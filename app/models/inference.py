@@ -1,5 +1,76 @@
+import os
+import pickle
+import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
+# ==========================================
+# 🧠 PART 1: THE DEEP LEARNING BRAIN (ST-GNN)
+# ==========================================
+
+class CausalSTGNN(nn.Module):
+    def __init__(self, num_nodes=23, num_features=14, hidden_dim=64, forecast_horizon=4):
+        super(CausalSTGNN, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.gru = nn.GRU(input_size=num_features, hidden_size=hidden_dim, batch_first=True)
+        self.spatial_linear = nn.Linear(hidden_dim, hidden_dim)
+        self.predictor = nn.Linear(hidden_dim, forecast_horizon)
+        
+    def forward(self, x, adj):
+        batch_size, seq_len, num_nodes, num_features = x.shape
+        x_reshaped = x.transpose(1, 2).reshape(batch_size * num_nodes, seq_len, num_features)
+        gru_out, hidden = self.gru(x_reshaped) 
+        last_hidden = hidden[-1].view(batch_size, num_nodes, self.hidden_dim)
+        spatial_out = torch.matmul(adj, last_hidden) 
+        spatial_out = F.relu(self.spatial_linear(spatial_out))
+        predictions = self.predictor(spatial_out)
+        return predictions.transpose(1, 2)
+
+def get_pm25_forecast():
+    """Loads the trained ST-GNN model, makes a prediction, and returns un-scaled PM2.5 values."""
+    
+    # Dynamic absolute paths so it works safely inside Streamlit
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(base_dir))
+    
+    model_path = os.path.join(base_dir, "stgnn_weights.pth")
+    scaler_path = os.path.join(base_dir, "scaler.pkl")
+    adj_path = os.path.join(project_root, "data", "processed", "adjacency_matrix.npy")
+    
+    # 1. Load the Model & Adjacency Matrix
+    model = CausalSTGNN()
+    model.load_state_dict(torch.load(model_path))
+    model.eval() # Set to evaluation mode
+    
+    adj_tensor = torch.tensor(np.load(adj_path), dtype=torch.float32)
+    
+    # 2. Mock recent historical data for the forward pass
+    # Shape: [1 Batch, 16 Time Steps, 23 Nodes, 14 Features]
+    recent_history = torch.rand((1, 16, 23, 14), dtype=torch.float32)
+    
+    # 3. Make the Prediction
+    with torch.no_grad():
+        scaled_prediction = model(recent_history, adj_tensor)
+        
+    pred_array = scaled_prediction.numpy()[0] # Shape: [4, 23]
+    
+    # 4. Un-scale back to real PM2.5 numbers
+    with open(scaler_path, "rb") as f:
+        scaler = pickle.load(f)
+        
+    dummy_array = np.zeros((4 * 23, 14))
+    dummy_array[:, 0] = pred_array.flatten()
+    
+    real_pm25_flat = scaler.inverse_transform(dummy_array)[:, 0]
+    real_pm25 = real_pm25_flat.reshape(4, 23)
+    
+    return real_pm25
+
+# ==========================================
+# 📊 PART 2: CAUSAL & POLICY LOGIC (FRONTEND HOOKS)
+# ==========================================
 
 def source_attribution(latest_row: pd.Series) -> pd.DataFrame:
     # Deterministic placeholder split for demo stability.
@@ -14,7 +85,6 @@ def source_attribution(latest_row: pd.Series) -> pd.DataFrame:
         }
     )
 
-
 def causal_graph_dot() -> str:
     return """
     digraph {
@@ -27,12 +97,10 @@ def causal_graph_dot() -> str:
     }
     """
 
-
 def run_counterfactual(latest_pm25: float, traffic_cut: int, industry_cut: int) -> tuple[float, float]:
     projected_drop = (traffic_cut * 0.35) + (industry_cut * 0.25)
     projected_pm25 = max(0.0, latest_pm25 * (1 - projected_drop / 100))
     return projected_pm25, projected_drop
-
 
 def policy_recommendation(latest_pm25: float) -> tuple[str, str]:
     if latest_pm25 >= 300:
