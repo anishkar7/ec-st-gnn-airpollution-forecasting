@@ -1,119 +1,92 @@
-import streamlit as st
 import pandas as pd
-import numpy as np
+import streamlit as st
 
-# --- Page Config ---
-st.set_page_config(page_title="Air Pollution Digital Twin", layout="wide")
+from components.attribution import render_attribution
+from components.causal import render_causal
+from components.counterfactual import render_counterfactual
+from components.forecast import render_forecast
+from components.overview import render_overview
+from components.policy import render_policy
+from components.styles import apply_theme
+from models.inference import (
+    causal_graph_dot,
+    policy_recommendation,
+    run_counterfactual,
+    source_attribution,
+)
+from utils.data_loader import (
+    build_forecast_frame,
+    load_metadata,
+    load_timeseries,
+    station_history,
+    station_snapshot,
+)
+from utils.formatting import safe_pct_change
 
-# --- SURGICAL GUMROAD CSS ---
-st.markdown("""
-<style>
-    /* 1. App Background */
-    .stApp, .stAppHeader {
-        background-color: #F4F0EA !important; 
-    }
-    
-    /* 2. Global Typography (Only target headers and labels, NOT complex divs) */
-    h1, h2, h3, h4, h5, h6, label, p {
-        color: #111111 !important;
-        font-family: 'Inter', 'Helvetica Neue', sans-serif !important;
-    }
 
-    /* 3. Main Title Styling */
-    h1 {
-        font-weight: 900 !important;
-        text-transform: uppercase !important;
-        letter-spacing: -1px !important;
-        border-bottom: 4px solid #111111 !important;
-        padding-bottom: 10px !important;
-        margin-bottom: 30px !important;
-    }
+st.set_page_config(page_title="Explainable ST-GNN Air Pollution Twin", layout="wide")
+apply_theme()
 
-    /* 4. Metric Cards (The Gumroad Tactile Look) */
-    [data-testid="stMetric"] {
-        background-color: #FFFFFF !important;
-        border: 3px solid #111111 !important;
-        padding: 20px !important;
-        border-radius: 0px !important; /* Sharp corners */
-        box-shadow: 6px 6px 0px #111111 !important;
-        transition: all 0.15s ease-in-out !important;
-    }
-    
-    /* Card Hover Animation */
-    [data-testid="stMetric"]:hover {
-        transform: translate(-3px, -3px) !important;
-        box-shadow: 9px 9px 0px #111111 !important;
-    }
+try:
+    nodes_df = load_metadata()
+    timeseries_df = load_timeseries()
+except Exception as exc:
+    st.error(f"Data initialization failed: {exc}")
+    st.info("Verify files exist inside data/processed and schema has required columns.")
+    st.stop()
 
-    /* 5. Metric Text Visibility */
-    [data-testid="stMetricLabel"] {
-        font-weight: 800 !important;
-        text-transform: uppercase !important;
-        font-size: 13px !important;
-        letter-spacing: 1px !important;
-        color: #555555 !important;
-    }
-    
-    [data-testid="stMetricValue"] {
-        font-weight: 900 !important;
-        font-size: 48px !important;
-        color: #111111 !important;
-    }
+st.title("ST-GNN Digital Twin for Delhi-NCR")
+st.markdown(
+    "<div class='block-note'>"
+    "Live dashboard for final-year project demonstration: forecasting, explainability, causal reasoning, and policy simulation."
+    "</div>",
+    unsafe_allow_html=True,
+)
 
-    /* 6. Sidebar Background */
-    [data-testid="stSidebar"] {
-        background-color: #E8E4DF !important;
-        border-right: 4px solid #111111 !important;
-    }
+st.sidebar.markdown("## Control Panel")
+selected_station = st.sidebar.selectbox("Target Station", nodes_df["station"].tolist(), index=0)
+forecast_horizon = st.sidebar.slider("Forecast Horizon (hours)", min_value=6, max_value=24, value=12, step=6)
+st.sidebar.caption("Data source: processed_delhi_data.csv + node_metadata.csv")
 
-    /* 7. Input Fields (Borders only, let Streamlit handle text) */
-    div[data-baseweb="select"] > div, div[data-baseweb="base-input"] > input {
-        border: 2px solid #111111 !important;
-        border-radius: 0px !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+station_df = station_history(timeseries_df, selected_station)
+latest_pm25, previous_pm25, latest_aqi = station_snapshot(station_df)
+pm25_change = latest_pm25 - previous_pm25
+pm25_pct_change = safe_pct_change(latest_pm25, previous_pm25)
+forecast_df = build_forecast_frame(station_df, forecast_horizon)
 
-# --- Load Data ---
-@st.cache_data
-def load_metadata():
-    return pd.read_csv(r"C:\Users\ANISH\Desktop\FRP\ecstgnn\ec-st-gnn-airpollution-forecasting\data\processed\node_metadata.csv")
 
-nodes_df = load_metadata()
+tabs = st.tabs(
+    [
+        "Overview",
+        "Forecast",
+        "Source Attribution",
+        "Causal Graph",
+        "Counterfactual Lab",
+        "Policy Recommendation",
+    ]
+)
 
-# --- Header ---
-st.title("🏙️ ST-GNN Digital Twin")
+with tabs[0]:
+    render_overview(nodes_df, timeseries_df, latest_pm25, pm25_change, latest_aqi, pm25_pct_change)
 
-# --- Sidebar Controls ---
-st.sidebar.markdown("## ⚙️ CONTROLS")
-selected_station = st.sidebar.selectbox("TARGET STATION", nodes_df['station'])
-forecast_horizon = st.sidebar.slider("FORECAST HORIZON (HRS)", min_value=6, max_value=24, step=6)
+with tabs[1]:
+    render_forecast(selected_station, forecast_df, forecast_horizon)
 
-# --- Top Row: Metrics ---
-col1, col2, col3 = st.columns([1, 1, 1])
+with tabs[2]:
+    attr_df = source_attribution(station_df.iloc[-1])
+    render_attribution(attr_df)
 
-with col1:
-    st.metric(label=f"CURRENT PM2.5: {selected_station}", value="185 µg", delta="12 µg (Rising)", delta_color="inverse")
-with col2:
-    st.metric(label=f"PREDICTED (+{forecast_horizon}H)", value="210 µg", delta="Hazardous Alert", delta_color="inverse")
-with col3:
-    st.metric(label="PRIMARY CAUSAL SOURCE", value="Upstream", delta="Punjab / Haryana", delta_color="normal")
+with tabs[3]:
+    render_causal(causal_graph_dot())
 
-st.markdown("<br><br>", unsafe_allow_html=True)
+with tabs[4]:
+    render_counterfactual(latest_pm25, run_counterfactual)
 
-# --- Bottom Row: Map and Chart ---
-col_map, col_chart = st.columns([2, 1.5])
+with tabs[5]:
+    render_policy(latest_pm25, policy_recommendation)
 
-with col_map:
-    st.markdown("### 📍 SPATIAL NETWORK (DELHI)")
-    st.map(nodes_df[['latitude', 'longitude']], zoom=10)
-
-with col_chart:
-    st.markdown("### 📈 TEMPORAL FORECAST")
-    # Mock dataframe for the line chart
-    mock_time = pd.date_range(start=pd.Timestamp.now(), periods=forecast_horizon, freq='H')
-    mock_pm25 = np.random.randint(150, 250, size=forecast_horizon)
-    chart_df = pd.DataFrame({"PM2.5 Level": mock_pm25}, index=mock_time)
-    
-    # Streamlit native chart - Using our accent color
-    st.line_chart(chart_df, color="#FF4B4B")
+with st.expander("Methodology Snapshot"):
+    st.write(
+        "This dashboard operationalizes the final-year project narrative: spatio-temporal forecasting, "
+        "source attribution, causal interpretability, counterfactual simulation, and policy support."
+    )
