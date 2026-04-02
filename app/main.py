@@ -23,7 +23,6 @@ from utils.data_loader import (
 )
 from utils.formatting import safe_pct_change
 
-
 st.set_page_config(page_title="Explainable ST-GNN Air Pollution Twin", layout="wide")
 apply_theme()
 
@@ -45,15 +44,17 @@ st.markdown(
 
 st.sidebar.markdown("## Control Panel")
 selected_station = st.sidebar.selectbox("Target Station", nodes_df["station"].tolist(), index=0)
-forecast_horizon = st.sidebar.slider("Forecast Horizon (hours)", min_value=6, max_value=24, value=12, step=6)
+forecast_horizon = st.sidebar.slider("Forecast Horizon (hours)", min_value=6, max_value=24, value=24, step=6)
 st.sidebar.caption("Data source: processed_delhi_data.csv + node_metadata.csv")
 
 station_df = station_history(timeseries_df, selected_station)
 latest_pm25, previous_pm25, latest_aqi = station_snapshot(station_df)
 pm25_change = latest_pm25 - previous_pm25
 pm25_pct_change = safe_pct_change(latest_pm25, previous_pm25)
-forecast_df = build_forecast_frame(station_df, forecast_horizon)
 
+# --- CLEAN ARCHITECTURE ---
+# The AI Model is now safely hidden inside this function call!
+forecast_df = build_forecast_frame(station_df, forecast_horizon)
 
 tabs = st.tabs(
     [

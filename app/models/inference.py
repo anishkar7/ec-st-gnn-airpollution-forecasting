@@ -29,15 +29,17 @@ class CausalSTGNN(nn.Module):
         return predictions.transpose(1, 2)
 
 def get_pm25_forecast():
-    """Loads the trained ST-GNN model, makes a prediction, and returns un-scaled PM2.5 values."""
+    """Loads the trained ST-GNN model, pulls the last 16 timesteps of real data, makes a prediction, and returns un-scaled PM2.5 values."""
     
-    # Dynamic absolute paths so it works safely inside Streamlit
+    # Dynamic absolute paths
     base_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(base_dir))
     
     model_path = os.path.join(base_dir, "stgnn_weights.pth")
     scaler_path = os.path.join(base_dir, "scaler.pkl")
     adj_path = os.path.join(project_root, "data", "processed", "adjacency_matrix.npy")
+    data_path = os.path.join(project_root, "data", "processed", "processed_delhi_data.csv")
+    nodes_path = os.path.join(project_root, "data", "processed", "node_metadata.csv")
     
     # 1. Load the Model & Adjacency Matrix
     model = CausalSTGNN()
@@ -46,20 +48,50 @@ def get_pm25_forecast():
     
     adj_tensor = torch.tensor(np.load(adj_path), dtype=torch.float32)
     
-    # 2. Mock recent historical data for the forward pass
-    # Shape: [1 Batch, 16 Time Steps, 23 Nodes, 14 Features]
-    recent_history = torch.rand((1, 16, 23, 14), dtype=torch.float32)
+    # 2. Fetch the REAL recent history from the dataset
+    df = pd.read_csv(data_path)
+    nodes = pd.read_csv(nodes_path)
     
-    # 3. Make the Prediction
+    # Ensure correct station ordering
+    station_to_id = dict(zip(nodes['station'], nodes['station_id']))
+    df['station_id'] = df['station'].map(station_to_id)
+    
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    df = df.sort_values(by=['datetime', 'station_id'])
+    
+    # Grab the last 16 unique timestamps
+    latest_times = df['datetime'].unique()[-16:]
+    df_recent = df[df['datetime'].isin(latest_times)]
+    
+    features = [
+        'pm25', 'pm10', 'no2', 'so2', 'co', 'o3', 'temperature', 
+        'humidity', 'wind_speed', 'visibility', 'aqi', 
+        'is_weekend', 'hour_sin', 'hour_cos'
+    ]
+    
+    num_nodes = len(nodes)
+    num_features = len(features)
+    
+    # Reshape to [Time, Nodes, Features]
+    raw_data = df_recent[features].values
+    reshaped_data = raw_data.reshape(16, num_nodes, num_features)
+    
+    # 3. Scale the real data using our saved scaler
+    with open(scaler_path, "rb") as f:
+        scaler = pickle.load(f)
+        
+    # Flatten, transform, then reshape back to a 4D Tensor: [Batch=1, Time=16, Nodes=23, Features=14]
+    scaled_data_2d = scaler.transform(reshaped_data.reshape(-1, num_features))
+    scaled_data = scaled_data_2d.reshape(1, 16, num_nodes, num_features)
+    recent_history = torch.tensor(scaled_data, dtype=torch.float32)
+    
+    # 4. Make the Prediction
     with torch.no_grad():
         scaled_prediction = model(recent_history, adj_tensor)
         
     pred_array = scaled_prediction.numpy()[0] # Shape: [4, 23]
     
-    # 4. Un-scale back to real PM2.5 numbers
-    with open(scaler_path, "rb") as f:
-        scaler = pickle.load(f)
-        
+    # 5. Un-scale back to real PM2.5 numbers
     dummy_array = np.zeros((4 * 23, 14))
     dummy_array[:, 0] = pred_array.flatten()
     

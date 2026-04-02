@@ -44,22 +44,54 @@ def station_snapshot(station_df: pd.DataFrame) -> tuple[float, float, float]:
 
 
 def build_forecast_frame(station_df: pd.DataFrame, forecast_horizon: int) -> pd.DataFrame:
-    latest_window = station_df.tail(8)
-    trend = latest_window["pm25"].diff().dropna().mean()
-    trend = 0.0 if pd.isna(trend) else float(trend)
-
     last_timestamp = station_df.iloc[-1]["datetime"]
-    last_value = float(station_df.iloc[-1]["pm25"])
+    station_name = station_df.iloc[-1]["station"]
+    
+    # --- PRIMARY PATH: PyTorch ST-GNN AI Model ---
+    try:
+        from models.inference import get_pm25_forecast
+        
+        # 1. Fetch live predictions [Shape: 4 steps, 23 nodes]
+        raw_preds = get_pm25_forecast()
+        
+        # 2. Get station index dynamically using our cached metadata loader
+        nodes_df = load_metadata()
+        station_idx = nodes_df[nodes_df["station"] == station_name].index[0]
+        
+        # 3. Extract 4-step predictions for the selected station
+        station_preds = raw_preds[:, station_idx]
+        
+        # 4. Map the 4 steps across the user's chosen forecast horizon (e.g. 24h = 6h steps)
+        step_hours = max(1, forecast_horizon // len(station_preds))
+        horizons = [step_hours * (i + 1) for i in range(len(station_preds))]
+        forecast_dates = [last_timestamp + pd.Timedelta(hours=h) for h in horizons]
+        
+        return pd.DataFrame({
+            "datetime": forecast_dates,
+            "pm25_forecast": station_preds,
+            "lower": [val * 0.85 for val in station_preds], # 15% uncertainty bounds
+            "upper": [val * 1.15 for val in station_preds]
+        })
+        
+    # --- FALLBACK PATH: Dummy Trend Baseline ---
+    except Exception as e:
+        print(f"AI Model Offline, using fallback: {e}")
+        
+        latest_window = station_df.tail(8)
+        trend = latest_window["pm25"].diff().dropna().mean()
+        trend = 0.0 if pd.isna(trend) else float(trend)
 
-    horizons = list(range(1, forecast_horizon + 1))
-    forecast_values = [max(0.0, last_value + trend * h) for h in horizons]
-    uncertainty = [max(8.0, abs(value) * 0.08) for value in forecast_values]
+        last_value = float(station_df.iloc[-1]["pm25"])
 
-    return pd.DataFrame(
-        {
-            "datetime": [last_timestamp + pd.Timedelta(hours=h) for h in horizons],
-            "pm25_forecast": forecast_values,
-            "lower": [value - unc for value, unc in zip(forecast_values, uncertainty)],
-            "upper": [value + unc for value, unc in zip(forecast_values, uncertainty)],
-        }
-    )
+        horizons = list(range(1, forecast_horizon + 1))
+        forecast_values = [max(0.0, last_value + trend * h) for h in horizons]
+        uncertainty = [max(8.0, abs(value) * 0.08) for value in forecast_values]
+
+        return pd.DataFrame(
+            {
+                "datetime": [last_timestamp + pd.Timedelta(hours=h) for h in horizons],
+                "pm25_forecast": forecast_values,
+                "lower": [value - unc for value, unc in zip(forecast_values, uncertainty)],
+                "upper": [value + unc for value, unc in zip(forecast_values, uncertainty)],
+            }
+        )
