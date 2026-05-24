@@ -1,7 +1,7 @@
 streamlit==1.32.0
-pandas<2.3.0
-numpy>=1.19.3,<2.0.0
+pandas==2.2.2
+numpy==1.26.4
 statsmodels
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch
-pillow>=10.0.0
+torch==2.3.1+cpu
+pillow==10.4.0
