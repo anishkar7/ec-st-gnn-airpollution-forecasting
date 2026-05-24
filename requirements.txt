@@ -1,7 +1,7 @@
 streamlit==1.32.0
-pandas
-numpy
+pandas<2.3.0
+numpy>=1.19.3,<2.0.0
 statsmodels
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
-pillow>=10.0.0 --only-binary :all:
+pillow>=10.0.0
