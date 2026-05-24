@@ -5,13 +5,33 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import shap
 from statsmodels.tsa.stattools import grangercausalitytests
+
+# ==========================================
+# ⚙️ GLOBAL CONFIGURATION & PATHS
+# ==========================================
+# Calculate paths EXACTLY ONCE on module load
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
+
+MODEL_PATH = os.path.join(BASE_DIR, "stgnn_weights.pth")
+SCALER_PATH = os.path.join(BASE_DIR, "scaler.pkl")
+ADJ_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "adjacency_matrix.npy")
+DATA_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "processed_delhi_data.csv")
+NODES_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "node_metadata.csv")
+
+# Centralized Feature Engineering Configuration
+STGNN_FEATURES = [
+    'pm25', 'pm10', 'no2', 'so2', 'co', 'o3', 'temperature', 
+    'humidity', 'wind_speed', 'visibility', 'aqi', 
+    'is_weekend', 'hour_sin', 'hour_cos'
+]
+CAUSAL_HUBS = ["Anand Vihar, Delhi", "Punjabi Bagh, Delhi", "Siri Fort, Delhi"]
+
 
 # ==========================================
 # 🧠 PART 1: THE DEEP LEARNING BRAIN (ST-GNN)
 # ==========================================
-
 class CausalSTGNN(nn.Module):
     def __init__(self, num_nodes=23, num_features=14, hidden_dim=64, forecast_horizon=4):
         super(CausalSTGNN, self).__init__()
@@ -30,60 +50,51 @@ class CausalSTGNN(nn.Module):
         predictions = self.predictor(spatial_out)
         return predictions.transpose(1, 2)
 
-def get_pm25_forecast():
-    """Loads the trained ST-GNN model, pulls the last 16 timesteps of real data, makes a prediction, and returns un-scaled PM2.5 values."""
-    
-    # Dynamic absolute paths
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(base_dir))
-    
-    model_path = os.path.join(base_dir, "stgnn_weights.pth")
-    scaler_path = os.path.join(base_dir, "scaler.pkl")
-    adj_path = os.path.join(project_root, "data", "processed", "adjacency_matrix.npy")
-    data_path = os.path.join(project_root, "data", "processed", "processed_delhi_data.csv")
-    nodes_path = os.path.join(project_root, "data", "processed", "node_metadata.csv")
-    
+
+# ==========================================
+# 🛠️ HELPER: SINGLE DATA LOADER
+# ==========================================
+def fetch_live_data():
+    """Fetches the dataset once to prevent I/O bottlenecks in the dashboard."""
+    df = pd.read_csv(DATA_PATH)
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    return df
+
+# ==========================================
+# 🚀 PART 2: FORECASTING & INFERENCE
+# ==========================================
+def get_pm25_forecast(df=None):
+    """Generates predictions. Accepts pre-loaded DataFrame for massive speed gains."""
+    if df is None:
+        df = fetch_live_data()
+        
     # 1. Load the Model & Adjacency Matrix
-    model = CausalSTGNN()
-    # Applied the security fix here: weights_only=True
-    model.load_state_dict(torch.load(model_path, weights_only=True))
-    model.eval() # Set to evaluation mode
+    model = CausalSTGNN(num_nodes=23, num_features=len(STGNN_FEATURES))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu', weights_only=True))
+    model.eval()
     
-    adj_tensor = torch.tensor(np.load(adj_path), dtype=torch.float32)
+    adj_tensor = torch.tensor(np.load(ADJ_PATH), dtype=torch.float32)
     
     # 2. Fetch the REAL recent history from the dataset
-    df = pd.read_csv(data_path)
-    nodes = pd.read_csv(nodes_path)
-    
-    # Ensure correct station ordering
+    nodes = pd.read_csv(NODES_PATH)
     station_to_id = dict(zip(nodes['station'], nodes['station_id']))
-    df['station_id'] = df['station'].map(station_to_id)
     
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    df = df.sort_values(by=['datetime', 'station_id'])
+    # Avoid SettingWithCopyWarning by creating an explicit copy for our slice
+    df_live = df.copy()
+    df_live['station_id'] = df_live['station'].map(station_to_id)
+    df_live = df_live.sort_values(by=['datetime', 'station_id'])
     
     # Grab the last 16 unique timestamps
-    latest_times = df['datetime'].unique()[-16:]
-    df_recent = df[df['datetime'].isin(latest_times)]
+    latest_times = df_live['datetime'].unique()[-16:]
+    df_recent = df_live[df_live['datetime'].isin(latest_times)]
     
-    features = [
-        'pm25', 'pm10', 'no2', 'so2', 'co', 'o3', 'temperature', 
-        'humidity', 'wind_speed', 'visibility', 'aqi', 
-        'is_weekend', 'hour_sin', 'hour_cos'
-    ]
-    
-    num_nodes = len(nodes)
-    num_features = len(features)
-    
-    # Reshape to [Time, Nodes, Features]
-    raw_data = df_recent[features].values
-    reshaped_data = raw_data.reshape(16, num_nodes, num_features)
+    num_nodes, num_features = len(nodes), len(STGNN_FEATURES)
+    reshaped_data = df_recent[STGNN_FEATURES].values.reshape(16, num_nodes, num_features)
     
     # 3. Scale the real data using our saved scaler
-    with open(scaler_path, "rb") as f:
+    with open(SCALER_PATH, "rb") as f:
         scaler = pickle.load(f)
         
-    # Flatten, transform, then reshape back to a 4D Tensor: [Batch=1, Time=16, Nodes=23, Features=14]
     scaled_data_2d = scaler.transform(reshaped_data.reshape(-1, num_features))
     scaled_data = scaled_data_2d.reshape(1, 16, num_nodes, num_features)
     recent_history = torch.tensor(scaled_data, dtype=torch.float32)
@@ -91,100 +102,66 @@ def get_pm25_forecast():
     # 4. Make the Prediction
     with torch.no_grad():
         scaled_prediction = model(recent_history, adj_tensor)
-        
-    pred_array = scaled_prediction.numpy()[0] # Shape: [4, 23]
+    pred_array = scaled_prediction.numpy()[0] 
     
     # 5. Un-scale back to real PM2.5 numbers
-    dummy_array = np.zeros((4 * 23, 14))
+    dummy_array = np.zeros((4 * num_nodes, num_features))
     dummy_array[:, 0] = pred_array.flatten()
-    
-    real_pm25_flat = scaler.inverse_transform(dummy_array)[:, 0]
-    real_pm25 = real_pm25_flat.reshape(4, 23)
+    real_pm25 = scaler.inverse_transform(dummy_array)[:, 0].reshape(4, num_nodes)
     
     return real_pm25
 
-# ==========================================
-# 📊 PART 2: CAUSAL & POLICY LOGIC (EXPLAINABILITY ENGINE)
-# ==========================================
 
+# ==========================================
+# 📊 PART 3: EXPLAINABILITY & CAUSAL ENGINE
+# ==========================================
 def source_attribution(latest_row: pd.Series) -> pd.DataFrame:
-    """
-    Calculates feature importance. In a full production environment, this wraps 
-    the PyTorch model in shap.DeepExplainer. For dashboard speed, we use a 
-    statistical correlation heuristic based on the latest live data point.
-    """
-    # Extract real meteorological and pollutant drivers from the live data
-    no2 = float(latest_row.get("no2", 0))       # Proxy for Traffic
-    so2 = float(latest_row.get("so2", 0))       # Proxy for Industry
-    pm10 = float(latest_row.get("pm10", 0))     # Proxy for Dust/Construction
+    """Calculates feature importance based on known atmospheric chemistry proxies."""
+    no2 = float(latest_row.get("no2", 0))       
+    so2 = float(latest_row.get("so2", 0))       
+    pm10 = float(latest_row.get("pm10", 0))     
     wind = float(latest_row.get("wind_speed", 0))
     
-    # Calculate relative impact ratios based on known atmospheric chemistry
     traffic_impact = max(5.0, no2 * 1.5)
     industry_impact = max(5.0, so2 * 2.0)
     dust_impact = max(5.0, (pm10 - latest_row.get("pm25", 0)) * 0.5)
-    
-    # Wind disperses pollution, so high wind reduces local regional transport share
     regional_impact = max(5.0, 50.0 - (wind * 2)) 
     
     total = traffic_impact + industry_impact + dust_impact + regional_impact
     
-    return pd.DataFrame(
-        {
-            "Source": ["Traffic Exhaust", "Industrial Emissions", "Construction/Dust", "Regional Transport"],
-            "Contribution (%)": [
-                round((traffic_impact / total) * 100, 1),
-                round((industry_impact / total) * 100, 1),
-                round((dust_impact / total) * 100, 1),
-                round((regional_impact / total) * 100, 1),
-            ],
-        }
-    ).sort_values(by="Contribution (%)", ascending=False)
+    return pd.DataFrame({
+        "Source": ["Traffic Exhaust", "Industrial Emissions", "Construction/Dust", "Regional Transport"],
+        "Contribution (%)": [
+            round((traffic_impact / total) * 100, 1),
+            round((industry_impact / total) * 100, 1),
+            round((dust_impact / total) * 100, 1),
+            round((regional_impact / total) * 100, 1),
+        ],
+    }).sort_values(by="Contribution (%)", ascending=False)
 
-def causal_graph_dot() -> str:
-    """
-    Generates a Directed Acyclic Graph (DAG) using dynamic data relationships.
-    Uses Granger Causality to map node-to-node pollution flow.
-    """
-    import os
-    import pandas as pd
-    from statsmodels.tsa.stattools import grangercausalitytests
-
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(base_dir))
-    data_path = os.path.join(project_root, "data", "processed", "processed_delhi_data.csv")
-    
+def causal_graph_dot(df=None) -> str:
+    """Generates a Granger Causality DAG. Accepts pre-loaded DataFrame for speed."""
     try:
-        # Load full data, then filter by TIME, not by rows
-        df = pd.read_csv(data_path)
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        
-        # Grab the last 100 unique timestamps (guarantees we get ALL stations for these times)
+        if df is None:
+            df = fetch_live_data()
+            
         latest_times = df['datetime'].unique()[-100:]
-        df = df[df['datetime'].isin(latest_times)]
+        df_recent = df[df['datetime'].isin(latest_times)]
         
-        # Map how pollution flows between 3 major hubs in Delhi
-        hubs = ["Anand Vihar, Delhi", "Punjabi Bagh, Delhi", "Siri Fort, Delhi"]
-        
-        # Check if stations actually exist in the data
-        available_stations = df['station'].unique()
-        for hub in hubs:
-            if hub not in available_stations:
-                print(f"🔥 DEBUG: Station '{hub}' not found in tail data. Available: {available_stations[:3]}...")
-        
-        # Pivot and gracefully handle missing data instead of dropping everything
-        pivot_df = df[df['station'].isin(hubs)].pivot_table(index='datetime', columns='station', values='pm25')
-        pivot_df = pivot_df.ffill().bfill() # Forward fill and backward fill missing hours
+        # Pivot and elegantly handle missing data
+        pivot_df = df_recent[df_recent['station'].isin(CAUSAL_HUBS)].pivot_table(
+            index='datetime', columns='station', values='pm25'
+        )
+        pivot_df = pivot_df.ffill().bfill() 
         
         if len(pivot_df) < 10:
-            raise ValueError(f"Not enough overlapping data points after pivot. Rows left: {len(pivot_df)}")
+            raise ValueError(f"Not enough overlapping data points. Rows: {len(pivot_df)}")
             
         causal_edges = []
         max_lag = 3 
         
-        # Run Granger Causality tests between the hubs
-        for source in hubs:
-            for target in hubs:
+        for source in CAUSAL_HUBS:
+            for target in CAUSAL_HUBS:
                 if source != target and source in pivot_df.columns and target in pivot_df.columns:
                     test_data = pivot_df[[target, source]]
                     gc_res = grangercausalitytests(test_data, maxlag=[max_lag], verbose=False)
@@ -200,43 +177,31 @@ def causal_graph_dot() -> str:
              
         edges_str = "\n        ".join(causal_edges)
         
-        dot_graph = f"""
+        return f"""
         digraph CausalGraph {{
             rankdir=LR;
             node [shape=box, style=filled, fillcolor="#E3F2FD", fontname="Helvetica", color="#1E88E5"];
             edge [fontname="Helvetica", fontsize=10];
-            
             {edges_str}
         }}
         """
-        return dot_graph
 
     except Exception as e:
-        # If it crashes, print the EXACT reason to your VS Code terminal
-        print(f"🔥 CAUSAL GRAPH CRASHED: {e}")
-        
-        # And render a giant red error on the dashboard so we don't miss it
+        print(f"🔥 DEBUG - CAUSAL GRAPH CRASHED: {e}")
         return f"""
         digraph ErrorGraph {{
             rankdir=LR;
             node [shape=box, style=filled, fillcolor="#FFCDD2", color="red", fontname="Helvetica"];
-            Math_Error [label="Causal Engine Offline\\nCheck VS Code Terminal for details"];
+            Math_Error [label="Causal Engine Offline\\nCheck Terminal"];
         }}
         """
 
-def run_counterfactual(latest_pm25: float, traffic_cut: int, industry_cut: int) -> tuple[float, float]:
-    """
-    Calculates dynamic counterfactuals. It uses the real-time attribution weights 
-    derived from the explainability engine to calculate the exact targeted drop.
-    """
-    # Fetch dynamic real data
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(os.path.dirname(base_dir))
-    data_path = os.path.join(project_root, "data", "processed", "processed_delhi_data.csv")
-    
+def run_counterfactual(latest_pm25: float, traffic_cut: int, industry_cut: int, df=None) -> tuple[float, float]:
+    """Calculates dynamic policy impacts based on live feature attribution."""
     try:
-        # Get the absolute latest row to find actual pollution shares
-        df = pd.read_csv(data_path)
+        if df is None:
+            df = fetch_live_data()
+            
         latest_row = df.iloc[-1]
         
         no2 = float(latest_row.get("no2", 0))       
@@ -251,35 +216,73 @@ def run_counterfactual(latest_pm25: float, traffic_cut: int, industry_cut: int) 
         
         total = traffic_impact + industry_impact + dust_impact + regional_impact
         
-        # Calculate real dynamic percentages
         traffic_pct = traffic_impact / total
         industry_pct = industry_impact / total
         
-        # Calculate the exact PM2.5 drop based on the dynamic shares
         actual_traffic_drop_pct = traffic_pct * (traffic_cut / 100.0)
         actual_industry_drop_pct = industry_pct * (industry_cut / 100.0)
-        
         total_drop_pct = actual_traffic_drop_pct + actual_industry_drop_pct
         
         projected_pm25 = max(0.0, latest_pm25 * (1 - total_drop_pct))
         
         return projected_pm25, (total_drop_pct * 100)
         
-    except Exception as e:
-        # Fallback if file read fails
+    except Exception:
+        # Fallback heuristic if dataframe slice fails
         projected_drop = (traffic_cut * 0.35) + (industry_cut * 0.25)
         projected_pm25 = max(0.0, latest_pm25 * (1 - projected_drop / 100))
         return projected_pm25, projected_drop
 
 def policy_recommendation(latest_pm25: float) -> tuple[str, str]:
-    """Dynamic policy generator based on Delhi's official GRAP guidelines."""
+    """
+    Dynamic policy generator based on Delhi's official GRAP guidelines.
+    Outputs formatted Markdown lists for clean UI rendering in Streamlit.
+    """
     if latest_pm25 >= 450:
-        return ("SEVERE+ EMERGENCY (GRAP Stage IV): Halt all construction, ban diesel trucks, mandate 50% WFH for corporate/government offices.", "Critical")
+        actions = (
+            "🚨 **SEVERE+ EMERGENCY (GRAP Stage IV)**\n"
+            "- **Traffic:** Ban entry of non-essential diesel trucks into Delhi.\n"
+            "- **Industry & Construction:** Halt all construction and demolition (C&D) activities.\n"
+            "- **Public Operations:** Mandate 50% Work-From-Home for corporate and municipal offices.\n"
+            "- **Education:** Suspend physical classes for schools and shift to online mode."
+        )
+        return (actions, "Critical")
+        
     elif latest_pm25 >= 300:
-        return ("SEVERE (GRAP Stage III): Ban BS-III petrol and BS-IV diesel vehicles. Intensify public transport frequency.", "High")
+        actions = (
+            "🔴 **SEVERE (GRAP Stage III)**\n"
+            "- **Traffic:** Ban BS-III petrol and BS-IV diesel vehicles.\n"
+            "- **Industry:** Suspend operations of stone crushers and brick kilns.\n"
+            "- **Public Transport:** Intensify public transport frequency (Metro/Buses).\n"
+            "- **Maintenance:** Mandate daily mechanized sweeping and water sprinkling."
+        )
+        return (actions, "High")
+        
     elif latest_pm25 >= 200:
-        return ("VERY POOR (GRAP Stage II): Increase parking fees to discourage private transport. Deploy anti-smog guns at hotspots.", "Medium")
+        actions = (
+            "🟠 **VERY POOR (GRAP Stage II)**\n"
+            "- **Traffic:** Increase parking fees drastically to discourage private transport.\n"
+            "- **Intervention:** Deploy anti-smog guns at identified pollution hotspots.\n"
+            "- **Commercial:** Strictly ban the use of coal and firewood in restaurants/tandoors.\n"
+            "- **Power:** Ensure uninterrupted power supply to deter diesel generator use."
+        )
+        return (actions, "Medium")
+        
     elif latest_pm25 >= 100:
-        return ("POOR (GRAP Stage I): Enforce strict bans on open waste burning. Synchronize traffic grids to reduce idling.", "Moderate")
+        actions = (
+            "🟡 **POOR (GRAP Stage I)**\n"
+            "- **Enforcement:** Enforce strict fines for open waste and biomass burning.\n"
+            "- **Traffic:** Synchronize traffic grids to reduce vehicle idling emissions.\n"
+            "- **Compliance:** Enforce PUC (Pollution Under Control) norm compliance strictly.\n"
+            "- **Construction:** Halt road construction activities generating heavy dust."
+        )
+        return (actions, "Moderate")
+        
     else:
-        return ("MODERATE/SATISFACTORY: Maintain standard monitoring. Continue mechanized road sweeping.", "Low")
+        actions = (
+            "🟢 **MODERATE / SATISFACTORY**\n"
+            "- **Monitoring:** Maintain standard regional air quality monitoring.\n"
+            "- **Maintenance:** Continue routine mechanized road sweeping.\n"
+            "- **Awareness:** Promote citizen awareness on public transport usage."
+        )
+        return (actions, "Low")

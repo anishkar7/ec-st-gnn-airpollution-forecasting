@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 from components.attribution import render_attribution
@@ -8,14 +9,16 @@ from components.forecast import render_forecast
 from components.overview import render_overview
 from components.policy import render_policy
 from components.styles import apply_theme
+
+# Import our new high-speed backend engine!
 from models.inference import (
+    get_pm25_forecast,
     causal_graph_dot,
     policy_recommendation,
     run_counterfactual,
     source_attribution,
 )
 from utils.data_loader import (
-    build_forecast_frame,
     load_metadata,
     load_timeseries,
     station_history,
@@ -23,10 +26,22 @@ from utils.data_loader import (
 )
 from utils.formatting import safe_pct_change
 
+# --- HELPER: LIVE AQI CALCULATOR (Fixes the stuck 500 bug) ---
+def calculate_indian_aqi(pm25):
+    """Calculates dynamic Indian CPCB AQI based on raw PM2.5 to un-stick the UI."""
+    if pm25 <= 30: return pm25 * (50/30)
+    elif pm25 <= 60: return 50 + (pm25 - 30) * (50/30)
+    elif pm25 <= 90: return 100 + (pm25 - 60) * (100/30)
+    elif pm25 <= 120: return 200 + (pm25 - 90) * (100/30)
+    elif pm25 <= 250: return 300 + (pm25 - 120) * (100/130)
+    else: return min(500, 400 + (pm25 - 250) * (100/130)) # Capped at 500 only for extreme emergencies
+
+
 st.set_page_config(page_title="Explainable ST-GNN Air Pollution Twin", layout="wide")
 apply_theme()
 
 try:
+    # Load massive dataset EXACTLY ONCE
     nodes_df = load_metadata()
     timeseries_df = load_timeseries()
 except Exception as exc:
@@ -47,15 +62,46 @@ selected_station = st.sidebar.selectbox("Target Station", nodes_df["station"].to
 forecast_horizon = st.sidebar.slider("Forecast Horizon (hours)", min_value=6, max_value=24, value=24, step=6)
 st.sidebar.caption("Data source: processed_delhi_data.csv + node_metadata.csv")
 
+# Get exact spatial index for the ST-GNN mapping (FIXES THE DROPDOWN BUG)
+# If Anand Vihar is selected, this finds its exact column index (e.g., 0)
+station_idx = nodes_df.index[nodes_df['station'] == selected_station].tolist()[0]
+
 station_df = station_history(timeseries_df, selected_station)
-latest_pm25, previous_pm25, latest_aqi = station_snapshot(station_df)
+
+# Fetch latest raw data, but calculate AQI dynamically to fix the stuck dial!
+latest_pm25, previous_pm25, _ = station_snapshot(station_df)
+latest_aqi = calculate_indian_aqi(latest_pm25)
+
 pm25_change = latest_pm25 - previous_pm25
 pm25_pct_change = safe_pct_change(latest_pm25, previous_pm25)
 
-# --- CLEAN ARCHITECTURE ---
-# The AI Model is now safely hidden inside this function call!
-forecast_df = build_forecast_frame(station_df, forecast_horizon)
+# --- DIRECT AI INFERENCE (Fixes the Dropdown & Slider Bugs) ---
 
+# Calculate how many 6-hour steps to display based on the user's slider
+num_steps = int(forecast_horizon // 6)
+
+# 1. Run ST-GNN on the pre-loaded dataframe (Model always returns 4 future steps)
+forecast_matrix = get_pm25_forecast(df=timeseries_df) 
+
+# 2. Slice the matrix for the exact station AND the exact number of time steps requested
+station_specific_forecast = forecast_matrix[:num_steps, station_idx] 
+
+# 3. Build the dataframe for the chart dynamically
+last_time = pd.to_datetime(station_df['datetime'].iloc[-1])
+future_times = [last_time + pd.Timedelta(hours=6 * (i + 1)) for i in range(num_steps)]
+
+# Generate realistic confidence bounds for the UI (+/- 15% heuristic)
+lower_bounds = np.maximum(0, station_specific_forecast * 0.85)
+upper_bounds = station_specific_forecast * 1.15
+
+forecast_df = pd.DataFrame({
+    'datetime': future_times,
+    'pm25_forecast': station_specific_forecast, 
+    'lower': lower_bounds,                      
+    'upper': upper_bounds                       
+})
+
+# --- UI RENDERING ---
 tabs = st.tabs(
     [
         "Overview",
@@ -78,12 +124,15 @@ with tabs[2]:
     render_attribution(attr_df)
 
 with tabs[3]:
-    render_causal(causal_graph_dot())
+    # Pass df to bypass I/O loading
+    render_causal(causal_graph_dot(df=timeseries_df))
 
 with tabs[4]:
-    render_counterfactual(latest_pm25, run_counterfactual)
+    # We use a lambda to cleanly pass the dataframe into your component
+    render_counterfactual(latest_pm25, lambda pm, t, i: run_counterfactual(pm, t, i, df=timeseries_df))
 
 with tabs[5]:
+    # Uses the new beautifully formatted Markdown policy list
     render_policy(latest_pm25, policy_recommendation)
 
 with st.expander("Methodology Snapshot"):
