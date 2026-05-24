@@ -4,3 +4,4 @@ numpy
 statsmodels
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
+pillow>=10.0.0 --only-binary :all:
