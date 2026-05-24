@@ -5,3 +5,4 @@ statsmodels
 torch
 torchvision
 pillow
+scikit-learn
