@@ -8,9 +8,9 @@ import torch.nn.functional as F
 from statsmodels.tsa.stattools import grangercausalitytests
 
 # ==========================================
-# ⚙️ GLOBAL CONFIGURATION & PATHS
+# Global configuration and file paths
 # ==========================================
-# Calculate paths EXACTLY ONCE on module load
+# Compute these file locations once when the module loads.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BASE_DIR))
 
@@ -20,7 +20,7 @@ ADJ_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "adjacency_matrix.npy
 DATA_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "processed_delhi_data.csv")
 NODES_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "node_metadata.csv")
 
-# Centralized Feature Engineering Configuration
+# Features used by the STGNN model
 STGNN_FEATURES = [
     'pm25', 'pm10', 'no2', 'so2', 'co', 'o3', 'temperature', 
     'humidity', 'wind_speed', 'visibility', 'aqi', 
@@ -30,7 +30,7 @@ CAUSAL_HUBS = ["Anand Vihar, Delhi", "Punjabi Bagh, Delhi", "Siri Fort, Delhi"]
 
 
 # ==========================================
-# 🧠 PART 1: THE DEEP LEARNING BRAIN (ST-GNN)
+# Part 1 — Spatio-temporal GNN model
 # ==========================================
 class CausalSTGNN(nn.Module):
     def __init__(self, num_nodes=23, num_features=14, hidden_dim=64, forecast_horizon=4):
@@ -52,7 +52,7 @@ class CausalSTGNN(nn.Module):
 
 
 # ==========================================
-# 🛠️ HELPER: SINGLE DATA LOADER
+# Helper — load dataset used by the dashboard
 # ==========================================
 def fetch_live_data():
     """Fetches the dataset once to prevent I/O bottlenecks in the dashboard."""
@@ -61,37 +61,37 @@ def fetch_live_data():
     return df
 
 # ==========================================
-# 🚀 PART 2: FORECASTING & INFERENCE
+# Part 2 — Forecasting and inference helpers
 # ==========================================
 def get_pm25_forecast(df=None):
     """Generates predictions. Accepts pre-loaded DataFrame for massive speed gains."""
     if df is None:
         df = fetch_live_data()
         
-    # 1. Load the Model & Adjacency Matrix
+    # Step 1 — load model weights and the spatial adjacency matrix
     model = CausalSTGNN(num_nodes=23, num_features=len(STGNN_FEATURES))
     model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu', weights_only=True))
     model.eval()
     
     adj_tensor = torch.tensor(np.load(ADJ_PATH), dtype=torch.float32)
     
-    # 2. Fetch the REAL recent history from the dataset
+    # Step 2 — prepare the most recent real-world observations
     nodes = pd.read_csv(NODES_PATH)
     station_to_id = dict(zip(nodes['station'], nodes['station_id']))
     
-    # Avoid SettingWithCopyWarning by creating an explicit copy for our slice
+    # Make an explicit copy to avoid pandas' SettingWithCopyWarning
     df_live = df.copy()
     df_live['station_id'] = df_live['station'].map(station_to_id)
     df_live = df_live.sort_values(by=['datetime', 'station_id'])
     
-    # Grab the last 16 unique timestamps
+    # Select the most recent 16 time steps
     latest_times = df_live['datetime'].unique()[-16:]
     df_recent = df_live[df_live['datetime'].isin(latest_times)]
     
     num_nodes, num_features = len(nodes), len(STGNN_FEATURES)
     reshaped_data = df_recent[STGNN_FEATURES].values.reshape(16, num_nodes, num_features)
     
-    # 3. Scale the real data using our saved scaler
+    # Step 3 — scale features using the saved scaler
     with open(SCALER_PATH, "rb") as f:
         scaler = pickle.load(f)
         
@@ -99,12 +99,12 @@ def get_pm25_forecast(df=None):
     scaled_data = scaled_data_2d.reshape(1, 16, num_nodes, num_features)
     recent_history = torch.tensor(scaled_data, dtype=torch.float32)
     
-    # 4. Make the Prediction
+    # Step 4 — run model inference without tracking gradients
     with torch.no_grad():
         scaled_prediction = model(recent_history, adj_tensor)
     pred_array = scaled_prediction.numpy()[0] 
     
-    # 5. Un-scale back to real PM2.5 numbers
+    # Step 5 — inverse-transform the predicted PM2.5 values back to original units
     dummy_array = np.zeros((4 * num_nodes, num_features))
     dummy_array[:, 0] = pred_array.flatten()
     real_pm25 = scaler.inverse_transform(dummy_array)[:, 0].reshape(4, num_nodes)
@@ -113,7 +113,7 @@ def get_pm25_forecast(df=None):
 
 
 # ==========================================
-# 📊 PART 3: EXPLAINABILITY & CAUSAL ENGINE
+# Part 3 — Explainability and causal analysis
 # ==========================================
 def source_attribution(latest_row: pd.Series) -> pd.DataFrame:
     """Calculates feature importance based on known atmospheric chemistry proxies."""
@@ -148,7 +148,7 @@ def causal_graph_dot(df=None) -> str:
         latest_times = df['datetime'].unique()[-100:]
         df_recent = df[df['datetime'].isin(latest_times)]
         
-        # Pivot and elegantly handle missing data
+        # Pivot the data for the causal hubs and fill forward/backward to handle gaps
         pivot_df = df_recent[df_recent['station'].isin(CAUSAL_HUBS)].pivot_table(
             index='datetime', columns='station', values='pm25'
         )
@@ -157,8 +157,9 @@ def causal_graph_dot(df=None) -> str:
         if len(pivot_df) < 10:
             raise ValueError(f"Not enough overlapping data points. Rows: {len(pivot_df)}")
             
+        # Maximum lag (in timesteps) to test for Granger causality
         causal_edges = []
-        max_lag = 3 
+        max_lag = 3
         
         for source in CAUSAL_HUBS:
             for target in CAUSAL_HUBS:
@@ -228,7 +229,7 @@ def run_counterfactual(latest_pm25: float, traffic_cut: int, industry_cut: int, 
         return projected_pm25, (total_drop_pct * 100)
         
     except Exception:
-        # Fallback heuristic if dataframe slice fails
+        # Fallback: use a simple heuristic when live data isn't available
         projected_drop = (traffic_cut * 0.35) + (industry_cut * 0.25)
         projected_pm25 = max(0.0, latest_pm25 * (1 - projected_drop / 100))
         return projected_pm25, projected_drop

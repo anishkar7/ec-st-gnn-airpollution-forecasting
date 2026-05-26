@@ -11,15 +11,16 @@ import torch.nn.functional as F
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from statsmodels.tsa.stattools import grangercausalitytests
 import warnings
+# Ignore noisy warnings for a cleaner run
 warnings.filterwarnings("ignore")
 
-# Force clean, publication-quality academic formatting
+# Set publication-quality plotting style and fonts
 plt.style.use('seaborn-v0_8-white')
 sns.set_context("paper", font_scale=1.2)
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['axes.edgecolor'] = '#475569'
 
-# Define path routing matching your workspace tree
+# Define project file paths
 BASE_DIR = os.getcwd()
 DATA_PATH = os.path.join(BASE_DIR, "data", "processed", "processed_delhi_data.csv")
 ADJ_PATH = os.path.join(BASE_DIR, "data", "processed", "adjacency_matrix.npy")
@@ -32,7 +33,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 print("🚀 Loading your actual project datasets and model weights...")
 
 # ==========================================
-# 1. CORE DATA & MODEL PREPARATION
+# 1. Core data and model preparation
 # ==========================================
 df_all = pd.read_csv(DATA_PATH)
 df_all['datetime'] = pd.to_datetime(df_all['datetime'])
@@ -41,17 +42,17 @@ station_to_id = dict(zip(nodes_df['station'], nodes_df['station_id']))
 df_all['station_id'] = df_all['station'].map(station_to_id)
 df_all = df_all.sort_values(by=['datetime', 'station_id'])
 
-# Reconstruct features array matching your STGNN input structure
+# Define the ST-GNN feature set and prepare time indices
 STGNN_FEATURES = ['pm25', 'pm10', 'no2', 'so2', 'co', 'o3', 'temperature', 'humidity', 'wind_speed', 'visibility', 'aqi', 'is_weekend', 'hour_sin', 'hour_cos']
 unique_times = df_all['datetime'].unique()
 train_size = int(len(unique_times) * 0.8)
 
-# Isolate testing split data
+# Build the test split from the tail of the timeline
 test_times = unique_times[train_size:]
 df_test = df_all[df_all['datetime'].isin(test_times)]
 av_idx = int(nodes_df[nodes_df['station'] == 'Anand Vihar, Delhi']['station_id'].values[0])
 
-# Re-import your specific CausalSTGNN blueprint dynamically
+# Import and load the trained CausalSTGNN model
 from app.models.inference import CausalSTGNN
 stgnn_model = CausalSTGNN(num_nodes=23, num_features=14, hidden_dim=64, forecast_horizon=4)
 stgnn_model.load_state_dict(torch.load(MODEL_PATH, map_location='cpu', weights_only=True), strict=False)
@@ -61,11 +62,11 @@ adj_tensor = torch.tensor(np.load(ADJ_PATH), dtype=torch.float32)
 with open(SCALER_PATH, "rb") as f:
     full_scaler = pickle.load(f)
 
-# Shape raw test data into spatiotemporal input blocks [Time, Nodes, Features]
+# Shape raw test data to [time, nodes, features]
 raw_eval_data = df_test[STGNN_FEATURES].values.reshape(len(test_times), 23, 14)
 scaled_eval_data = full_scaler.transform(raw_eval_data.reshape(-1, 14)).reshape(len(test_times), 23, 14)
 
-# Create evaluation batches matching your 16-hour lookback constraint
+# Build evaluation batches using the 16-hour lookback
 X_stgnn, y_ground_truth = [], []
 for i in range(len(test_times) - 16 - 4):
     X_stgnn.append(scaled_eval_data[i : i + 16])
@@ -78,22 +79,22 @@ print("🔮 Running full test-set inference pass over your weights...")
 with torch.no_grad():
     stgnn_preds = stgnn_model(X_stgnn_tensor, adj_tensor)
 
-# Extract first-step future forecast step (t+1) for Anand Vihar node
+# Extract t+1 horizon forecasts for Anand Vihar
 stgnn_scaled_preds = stgnn_preds[:, 0, av_idx].numpy()
 dummy_array = np.zeros((len(stgnn_scaled_preds), 14))
 dummy_array[:, 0] = stgnn_scaled_preds
 stgnn_predictions = full_scaler.inverse_transform(dummy_array)[:, 0]
 
-# Ensure arrays match perfectly in length
+# Trim arrays so predictions and ground truth have the same length
 min_len = min(len(y_ground_truth), len(stgnn_predictions))
 y_ground_truth = y_ground_truth[:min_len]
 stgnn_predictions = stgnn_predictions[:min_len]
 
 
 # ==========================================
-# FIGURE 4.2: TRUE PREDICTED VS ACTUAL SCATTER
+# Figure 4.2: Predicted vs. actual scatter
 # ==========================================
-print("📊 Processing Real Figure 4.2: Predicted vs Actual Regression Scatter...")
+print("📊 Processing Figure 4.2: Predicted vs Actual regression scatter...")
 fig, ax = plt.subplots(figsize=(6.5, 5.5))
 ax.scatter(y_ground_truth, stgnn_predictions, alpha=0.4, color='#059669', edgecolors='w', linewidths=0.2, label='ST-GNN Inference Points')
 ax.plot([y_ground_truth.min(), y_ground_truth.max()], [y_ground_truth.min(), y_ground_truth.max()], color='#EF4444', linestyle='--', linewidth=1.5, label='Identity Line (y = x)')
@@ -109,10 +110,10 @@ plt.close()
 
 
 # ==========================================
-# FIGURE 4.3: REAL TIME-SERIES TIMELINE OVERLAY
+# Figure 4.3: Time-series overlay (short validation horizon)
 # ==========================================
-print("📈 Processing Real Figure 4.3: 30-Day Real Data Sequence Tracking...")
-# Slice down to a clean visual window (first 12 days / 288 hours of the testing set)
+print("📈 Processing Figure 4.3: 30-day time-series comparison...")
+# Limit the plot to the first 12 days (288 hours) or available data
 display_hours = min(288, len(stgnn_predictions))
 
 fig, ax = plt.subplots(figsize=(13, 5))
@@ -130,12 +131,12 @@ plt.close()
 
 
 # ==========================================
-# FIGURE 4.4: GENUINE FEATURE ATTRIBUTION & DISPERSION CURVE
+# Figure 4.4: Feature attribution proxies and dispersion analysis
 # ==========================================
-print("🧠 Processing Real Figure 4.4: True Proxy Value Metrics and Dispersion Curve...")
+print("🧠 Processing Figure 4.4: Feature attribution and dispersion curve...")
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-# Subplot A: Calculate true feature counts from your actual dataset rows to find proxy averages
+# Subplot A: compute dataset-wide mean statistics as proxy feature importances
 avg_no2 = df_test['no2'].mean()
 avg_so2 = df_test['so2'].mean()
 avg_pm10 = df_test['pm10'].mean()
@@ -157,7 +158,7 @@ ax1.set_title('(a) Global Feature Importance Proxy Attribution Rankings', fontwe
 ax1.grid(axis='x', linestyle='--', alpha=0.5)
 ax1.invert_yaxis()
 
-# Subplot B: Use your actual validation features to show the true non-linear wind speed dispersion curve
+# Subplot B: scatter wind speed vs PM2.5 to illustrate dispersion behavior
 sampled_test_df = df_test.sample(n=min(600, len(df_test)), random_state=42)
 ax2.scatter(sampled_test_df['wind_speed'].values, sampled_test_df['pm25'].values, c=sampled_test_df['pm25'].values, cmap='viridis', alpha=0.6, edgecolors='none')
 ax2.set_xlabel('True Station Recorded Wind Speed ($m/s$)', fontweight='bold')
@@ -172,14 +173,14 @@ plt.close()
 
 
 # ==========================================
-# FIGURE 4.5: REAL GRANGER CAUSALITY HEURISTIC HEATMAP
+# Figure 4.5: Pairwise Granger causality heatmap
 # ==========================================
-print("🧬 Processing Real Figure 4.5: Executing True Pairwise Granger F-Tests...")
+print("🧬 Processing Figure 4.5: Pairwise Granger F-tests...")
 CAUSAL_HUBS = ["Anand Vihar, Delhi", "Punjabi Bagh, Delhi", "Siri Fort, Delhi"]
-# Pivot your actual data table observations to capture true timeline alignment
+# Pivot PM2.5 into a wide table indexed by datetime for causality testing
 pivot_df = df_all[df_all['station'].isin(CAUSAL_HUBS)].pivot_table(index='datetime', columns='station', values='pm25').ffill().bfill()
 
-# Focus evaluation on the recent active window exactly matching your dashboard constraints
+# Restrict to a recent window for stable pairwise tests
 recent_window_df = pivot_df.iloc[-150:]
 dim = len(CAUSAL_HUBS)
 f_stat_matrix = np.zeros((dim, dim))
@@ -209,10 +210,10 @@ plt.close()
 
 
 # ==========================================
-# FIGURE 4.6: CROSS-SEASONAL FLUID TRANSPORT MATRIX REVERSAL
+# Figure 4.6: Seasonal transport comparison (winter vs summer)
 # ==========================================
-print("❄️/☀️ Processing Real Figure 4.6: Processing True Seasonal Boundary Slices...")
-# Extract true winter rows (November to February) vs true summer rows (April to June) from your historical log
+print("❄️/☀️ Processing Figure 4.6: Seasonal boundary slices...")
+# Select winter (Nov–Feb) and summer (Apr–Jun) slices from the historical record
 df_all['month'] = df_all['datetime'].dt.month
 winter_df = df_all[df_all['month'].isin([11, 12, 1, 2])].pivot_table(index='datetime', columns='station', values='pm25').ffill().bfill().iloc[-100:]
 summer_df = df_all[df_all['month'].isin([4, 5, 6])].pivot_table(index='datetime', columns='station', values='pm25').ffill().bfill().iloc[-100:]
@@ -227,14 +228,14 @@ for ax, season_data, label in [(ax1, winter_df, 'Winter Shift: Prevailing Northw
     ax.set_yticks([])
     ax.set_facecolor('#F8FAFC')
     
-    # Calculate true cross-station relations for this specific seasonal file slice
+    # Compute pairwise Granger tests for this seasonal slice and draw significant links
     for s_idx, source in enumerate(CAUSAL_HUBS):
         for t_idx, target in enumerate(CAUSAL_HUBS):
             if source != target and source in season_data.columns and target in season_data.columns:
                 try:
                     res = grangercausalitytests(season_data[[target, source]], maxlag=[2], verbose=False)
                     p_val = res[2][0]['ssr_ftest'][1]
-                    if p_val < 0.15: # Draw relationships that clear threshold during this timeframe
+                    if p_val < 0.15: # Draw edges where the p-value clears the significance threshold
                         x1, y1 = node_positions[source]
                         x2, y2 = node_positions[target]
                         line_color = '#DC2626' if 'Winter' in label else '#2563EB'
@@ -252,4 +253,4 @@ plt.tight_layout()
 plt.savefig(os.path.join(SAVE_DIR, "fig4_6_seasonal_dag_reversal.png"), dpi=300)
 plt.close()
 
-print("\n🏆 SUCCESS! All figures generated from your real datasets have been saved to /thesis_plots/.")
+print("\n🏆 SUCCESS! All figures generated from your datasets have been saved to /thesis_plots/.")

@@ -5,29 +5,29 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import networkx as nx
 
-# Create the save directory if it doesn't exist
+# Create the output directory if it doesn't already exist
 save_dir = os.path.join(os.getcwd(), "thesis_plots")
 os.makedirs(save_dir, exist_ok=True)
 
-# Global Thesis Styling
+# Global thesis plotting style
 plt.style.use('seaborn-v0_8-white')
 sns.set_context("paper", font_scale=1.4)
 color_real = '#1E293B'  # Slate Deep Blue
 color_pred = '#E63946'  # Crimson Red
 color_stgnn = '#059669' # Emerald Green
 
-print("🚀 Initializing Thesis Visual Generation Engine...")
+print("🚀 Initializing thesis visual generation engine...")
 
 # ==========================================
-# 1. TEMPORAL VIEW: PREDICTION VS REALITY
+# 1. Temporal view — prediction vs. reality
 # ==========================================
-print("🎨 Generating Plot 1: Temporal Overlay...")
+print("🎨 Generating Plot 1: Temporal overlay...")
 fig1, ax1 = plt.subplots(figsize=(12, 5))
 
-# Simulated 72-hour timeline for Anand Vihar
+# Simulated 72-hour timeline for Anand Vihar (example data)
 hours = np.arange(72)
 true_pm25 = 150 + 50 * np.sin(hours / 6) + np.random.normal(0, 15, 72)
-# The ST-GNN predicts closely, but with a slight lag/smoothing on the peaks
+# ST-GNN predictions are similar with slight peak smoothing/lag
 pred_pm25 = 150 + 45 * np.sin((hours - 1) / 6) + np.random.normal(0, 10, 72)
 
 ax1.plot(hours, true_pm25, label='Actual PM2.5 (Ground Truth)', color=color_real, linewidth=2)
@@ -46,36 +46,36 @@ plt.tight_layout()
 fig1.savefig(os.path.join(save_dir, "fig2_temporal_overlay.png"), dpi=300, bbox_inches='tight')
 
 # ==========================================
-# 2. SPATIAL VIEW: DELHI SENSOR NETWORK 
+# 2. Spatial view — Delhi sensor network
 # ==========================================
-print("🎨 Generating Plot 2: Spatial Network...")
+print("🎨 Generating Plot 2: Spatial network...")
 fig2, ax2 = plt.subplots(figsize=(8, 8))
 
 G = nx.Graph()
-# 8 major representative hubs for clean visualization
+# Select a set of representative hubs for the visualization
 nodes = ['Anand Vihar', 'Punjabi Bagh', 'Siri Fort', 'ITO', 'Dwarka', 'Rohini', 'Okhla', 'Bawana']
-# Simulated pseudo-coordinates for Delhi map layout
+# Pseudo-coordinates to lay out nodes on a schematic Delhi map
 pos = {'Anand Vihar': (8, 6), 'Punjabi Bagh': (3, 6), 'Siri Fort': (5, 3), 'ITO': (6, 5), 
        'Dwarka': (1, 3), 'Rohini': (2, 8), 'Okhla': (7, 2), 'Bawana': (2, 10)}
-# Simulated pollution levels (higher = darker red)
+# Simulated pollution levels used to color nodes
 pollution_levels = [350, 210, 180, 290, 150, 220, 260, 190]
 
 for node in nodes:
     G.add_node(node)
-# Add edges based on spatial proximity (Adjacency Matrix representation)
+# Add edges representing spatial proximity / transport links
 edges = [('Anand Vihar', 'ITO'), ('ITO', 'Siri Fort'), ('Siri Fort', 'Okhla'),
          ('Punjabi Bagh', 'Rohini'), ('Punjabi Bagh', 'Dwarka'), ('Rohini', 'Bawana'),
          ('Punjabi Bagh', 'ITO')]
 G.add_edges_from(edges)
 
-# Draw edges and nodes
+# Draw network edges and nodes with color-coded pollution
 nx.draw_networkx_edges(G, pos, ax=ax2, edge_color='#CBD5E1', width=2)
 nodes_draw = nx.draw_networkx_nodes(G, pos, ax=ax2, node_color=pollution_levels, 
                                     cmap=plt.cm.Reds, node_size=1500, edgecolors='black', vmin=100, vmax=400)
 nx.draw_networkx_labels(G, pos, ax=ax2, font_size=10, font_weight='bold', 
                         font_color='black', verticalalignment='bottom')
 
-# Add a colorbar to explain the node colors
+# Add colorbar to explain node color scale (PM2.5)
 cbar = plt.colorbar(nodes_draw, ax=ax2, fraction=0.046, pad=0.04)
 cbar.set_label('PM2.5 Level (µg/m³)', fontweight='bold')
 ax2.set_title('Spatial Graph Topology of Delhi Monitoring Network', pad=15, fontweight='bold')
@@ -85,16 +85,16 @@ plt.tight_layout()
 fig2.savefig(os.path.join(save_dir, "fig3_spatial_network.png"), dpi=300, bbox_inches='tight')
 
 # ==========================================
-# 3. EXPLAINABILITY: SOURCE ATTRIBUTION
+# 3. Explainability — source attribution
 # ==========================================
-print("🎨 Generating Plot 3: Source Attribution Donut...")
+print("🎨 Generating Plot 3: Source attribution donut...")
 fig3, ax3 = plt.subplots(figsize=(8, 6))
 
 sources = ['Traffic Exhaust', 'Industrial Emissions', 'Construction/Dust', 'Regional Transport']
 percentages = [42.5, 25.0, 18.5, 14.0]
 colors = ['#1E88E5', '#D81B60', '#FFC107', '#004D40']
 
-# Create a donut chart
+# Draw a donut chart showing source shares
 wedges, texts, autotexts = ax3.pie(percentages, labels=sources, autopct='%1.1f%%', startangle=140, 
                                    colors=colors, wedgeprops=dict(width=0.4, edgecolor='w'))
 
@@ -106,9 +106,9 @@ plt.tight_layout()
 fig3.savefig(os.path.join(save_dir, "fig4_source_attribution.png"), dpi=300, bbox_inches='tight')
 
 # ==========================================
-# 4. CAUSAL FLOW: GRANGER DAG
+# 4. Causal flow — Granger-based DAG
 # ==========================================
-print("🎨 Generating Plot 4: Directed Acyclic Graph (DAG)...")
+print("🎨 Generating Plot 4: causal DAG...")
 fig4, ax4 = plt.subplots(figsize=(9, 5))
 
 DAG = nx.DiGraph()
@@ -116,7 +116,6 @@ hubs = ['Punjabi Bagh\n(Upwind)', 'Anand Vihar\n(Downwind)', 'Siri Fort\n(Centra
 DAG.add_nodes_from(hubs)
 dag_pos = {'Punjabi Bagh\n(Upwind)': (0, 1), 'Anand Vihar\n(Downwind)': (2, 1), 'Siri Fort\n(Central)': (1, 0)}
 
-# Adding directional causal edges
 DAG.add_edge('Punjabi Bagh\n(Upwind)', 'Anand Vihar\n(Downwind)', weight=3)
 DAG.add_edge('Punjabi Bagh\n(Upwind)', 'Siri Fort\n(Central)', weight=1.5)
 
@@ -142,7 +141,7 @@ print("🎨 Generating Plot 5: Ablation Architecture Study...")
 fig5, ax5 = plt.subplots(figsize=(10, 6))
 
 architectures = ['Full ST-GNN\n(Proposed)', 'w/o Spatial Layer\n(GRU Only)', 'w/o Temporal Layer\n(GCN Only)']
-ablation_rmse = [110.82, 165.40, 192.15] # Showing how removing layers hurts performance
+ablation_rmse = [110.82, 165.40, 192.15] # Example RMSEs illustrating impact of ablating components
 ablation_colors = [color_stgnn, '#94A3B8', '#64748B']
 
 bars = ax5.bar(architectures, ablation_rmse, color=ablation_colors, edgecolor='black', width=0.5)
@@ -164,7 +163,7 @@ print("\n✅ SUCCESS! All 5 High-Impact Visuals saved to your 'thesis_plots' fol
 print("🎨 Generating Plot 6: Feature Correlation Heatmap...")
 fig6, ax6 = plt.subplots(figsize=(10, 8))
 
-# Simulated correlation matrix for Delhi's environmental features
+# Example correlation matrix for Delhi environmental features
 features = ['PM2.5', 'PM10', 'NO2', 'SO2', 'Wind Spd', 'Temp', 'Humidity', 'Traffic']
 # Creating a realistic correlation matrix (e.g., Wind reduces PM2.5, NO2 increases it)
 corr_data = np.array([
